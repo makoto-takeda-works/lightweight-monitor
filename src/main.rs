@@ -79,15 +79,12 @@ impl MetricsCollector for SysinfoCollector {
     fn collect_metrics(&self) -> SystemMetrics {
         let mut sys = System::new_all();
 
-        // CPU使用率は測定間隔が必要なため、一度リフレッシュしてわずかに待機
         sys.refresh_cpu_usage();
         thread::sleep(Duration::from_millis(200));
         sys.refresh_cpu_usage();
 
-        // CPU計測
         let cpu_usage_percent = sys.global_cpu_info().cpu_usage();
 
-        // メモリ計測
         let total_memory = sys.total_memory();
         let used_memory = sys.used_memory();
         let memory_percent = if total_memory > 0 {
@@ -96,7 +93,6 @@ impl MetricsCollector for SysinfoCollector {
             0.0
         };
 
-        // ディスク計測（全マウントポイントの合計を計算）
         let disks = Disks::new_with_refreshed_list();
         let mut total_disk: u64 = 0;
         let mut used_disk: u64 = 0;
@@ -142,18 +138,30 @@ impl MetricsCollector for SysinfoCollector {
     }
 }
 
-fn main() {
-    println!("--- 軽量モニターAgent (sysinfo実機データ収集) ---");
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("--- 軽量モニターAgent (HTTP POST送信検証) ---");
 
     let collector = SysinfoCollector;
     let payload = collector.build_payload();
 
-    match serde_json::to_string_pretty(&payload) {
-        Ok(json_str) => {
-            println!("取得した実機メトリクスJSON:\n{}", json_str);
-        }
-        Err(e) => {
-            eprintln!("JSON変換エラー: {}", e);
-        }
-    }
+    // 動作確認用の公開テスティングAPI
+    let target_url = "https://httpbin.org/post";
+
+    println!("送信先URL: {}", target_url);
+    println!("メトリクス送信中...");
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(target_url)
+        .json(&payload)
+        .send()
+        .await?;
+
+    println!("レスポンスステータス: {}", response.status());
+
+    let response_text = response.text().await?;
+    println!("サーバー返却データ:\n{}", response_text);
+
+    Ok(())
 }
