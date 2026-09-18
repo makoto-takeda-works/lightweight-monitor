@@ -165,3 +165,84 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 1. テスト専用のモックコレクター（実機の環境情報に依存しない）
+    pub struct DummyCollector;
+
+    impl MetricsCollector for DummyCollector {
+        fn collect_host_info(&self) -> HostInfo {
+            HostInfo {
+                hostname: "test-host".to_string(),
+                os_type: OsType::MacOS,
+                agent_version: "0.1.0".to_string(),
+            }
+        }
+
+        fn collect_metrics(&self) -> SystemMetrics {
+            SystemMetrics {
+                cpu_usage_percent: 12.5,
+                memory: MemoryMetrics {
+                    total_bytes: 1000,
+                    used_bytes: 500,
+                    usage_percent: 50.0,
+                },
+                disk: DiskMetrics {
+                    total_bytes: 2000,
+                    used_bytes: 1000,
+                    usage_percent: 50.0,
+                },
+                uptime_seconds: 1234,
+            }
+        }
+
+        fn build_payload(&self) -> MonitorPayload {
+            MonitorPayload {
+                host_info: self.collect_host_info(),
+                metrics: self.collect_metrics(),
+                timestamp_unix: 1700000000,
+            }
+        }
+    }
+
+    // 2. OsType の serde シリアライズ/デシリアライズ検証（lowercase化の動作確認）
+    #[test]
+    fn test_os_type_serde() {
+        let os = OsType::MacOS;
+        let json_str = serde_json::to_string(&os).expect("Failed to serialize OsType");
+        assert_eq!(json_str, "\"macos\"");
+
+        let deserialized: OsType = serde_json::from_str("\"macos\"").expect("Failed to deserialize OsType");
+        assert_eq!(deserialized, OsType::MacOS);
+    }
+
+    // 3. DummyCollector を用いた MetricsCollector トレイティの実装検証
+    #[test]
+    fn test_dummy_collector_payload() {
+        let collector = DummyCollector;
+        let payload = collector.build_payload();
+
+        assert_eq!(payload.host_info.hostname, "test-host");
+        assert_eq!(payload.host_info.os_type, OsType::MacOS);
+        assert_eq!(payload.metrics.cpu_usage_percent, 12.5);
+        assert_eq!(payload.metrics.memory.used_bytes, 500);
+        assert_eq!(payload.timestamp_unix, 1700000000);
+    }
+
+    // 4. MonitorPayload 全体が正しい JSON キー構造へ変換されるか検証
+    #[test]
+    fn test_payload_json_structure() {
+        let collector = DummyCollector;
+        let payload = collector.build_payload();
+
+        let json_value = serde_json::to_value(&payload).expect("Failed to convert payload to serde_json::Value");
+
+        assert_eq!(json_value["host_info"]["hostname"], "test-host");
+        assert_eq!(json_value["host_info"]["os_type"], "macos");
+        assert_eq!(json_value["metrics"]["cpu_usage_percent"], 12.5);
+        assert_eq!(json_value["metrics"]["memory"]["usage_percent"], 50.0);
+    }
+}
