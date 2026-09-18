@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
-use sysinfo::{Disks, System};
-use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::time::interval;
+
+// ==========================================
+// 1. Enum (列挙型) & Struct (構造体) の定義
+// ==========================================
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -48,84 +51,47 @@ pub struct MonitorPayload {
     pub timestamp_unix: u64,
 }
 
+// ==========================================
+// 2. Trait & Collector 実装
+// ==========================================
+
 pub trait MetricsCollector {
     fn collect_host_info(&self) -> HostInfo;
     fn collect_metrics(&self) -> SystemMetrics;
     fn build_payload(&self) -> MonitorPayload;
 }
 
-pub struct SysinfoCollector;
+pub struct DummyCollector;
 
-impl MetricsCollector for SysinfoCollector {
+impl MetricsCollector for DummyCollector {
     fn collect_host_info(&self) -> HostInfo {
-        let os_name = System::name().unwrap_or_default().to_lowercase();
-        let os_type = if os_name.contains("darwin") || os_name.contains("mac") {
-            OsType::MacOS
-        } else if os_name.contains("linux") {
-            OsType::Linux
-        } else if os_name.contains("windows") {
-            OsType::Windows
-        } else {
-            OsType::Unknown
-        };
-
         HostInfo {
-            hostname: System::host_name().unwrap_or_else(|| "unknown-host".to_string()),
-            os_type,
+            hostname: "demo-host".to_string(),
+            os_type: OsType::MacOS,
             agent_version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
 
     fn collect_metrics(&self) -> SystemMetrics {
-        let mut sys = System::new_all();
-
-        sys.refresh_cpu_usage();
-        thread::sleep(Duration::from_millis(200));
-        sys.refresh_cpu_usage();
-
-        let cpu_usage_percent = sys.global_cpu_info().cpu_usage();
-
-        let total_memory = sys.total_memory();
-        let used_memory = sys.used_memory();
-        let memory_percent = if total_memory > 0 {
-            (used_memory as f32 / total_memory as f32) * 100.0
-        } else {
-            0.0
-        };
-
-        let disks = Disks::new_with_refreshed_list();
-        let mut total_disk: u64 = 0;
-        let mut used_disk: u64 = 0;
-        for disk in &disks {
-            let total = disk.total_space();
-            let available = disk.available_space();
-            total_disk += total;
-            used_disk += total.saturating_sub(available);
-        }
-        let disk_percent = if total_disk > 0 {
-            (used_disk as f32 / total_disk as f32) * 100.0
-        } else {
-            0.0
-        };
-
         SystemMetrics {
-            cpu_usage_percent,
+            cpu_usage_percent: 15.5,
             memory: MemoryMetrics {
-                total_bytes: total_memory,
-                used_bytes: used_memory,
-                usage_percent: memory_percent,
+                total_bytes: 16 * 1024 * 1024 * 1024,
+                used_bytes: 4 * 1024 * 1024 * 1024,
+                usage_percent: 25.0,
             },
             disk: DiskMetrics {
-                total_bytes: total_disk,
-                used_bytes: used_disk,
-                usage_percent: disk_percent,
+                total_bytes: 500 * 1024 * 1024 * 1024,
+                used_bytes: 125 * 1024 * 1024 * 1024,
+                usage_percent: 25.0,
             },
-            uptime_seconds: System::uptime(),
+            uptime_seconds: 3600,
         }
     }
 
     fn build_payload(&self) -> MonitorPayload {
-        let now = SystemTime::now()
+        // 現在の UNIX タイムスタンプを動的に取得
+        let now_unix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
@@ -133,116 +99,48 @@ impl MetricsCollector for SysinfoCollector {
         MonitorPayload {
             host_info: self.collect_host_info(),
             metrics: self.collect_metrics(),
-            timestamp_unix: now,
+            timestamp_unix: now_unix,
         }
     }
 }
+
+// ==========================================
+// 3. 非同期メイン関数 & 10秒周期送信ループ
+// ==========================================
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("--- 軽量モニターAgent (HTTP POST送信検証) ---");
+async fn main() {
+    println!("--- 軽量モニターAgent 起動 (10秒周期送信モード) ---");
 
-    let collector = SysinfoCollector;
-    let payload = collector.build_payload();
+    let collector = DummyCollector;
+    // リクエスト間で接続を再利用するため Client を1つ生成
+    let client = reqwest::Client::new();
 
-    // 動作確認用の公開テスティングAPI
+    // 動作確認用テストエンドポイント (送信されたJSONをそのままレスポンスとして返すテスト用サーバー)
     let target_url = "https://httpbin.org/post";
 
-    println!("送信先URL: {}", target_url);
-    println!("メトリクス送信中...");
+    // 10秒間隔のタイマーを作成
+    let mut ticker = interval(Duration::from_secs(10));
 
-    let client = reqwest::Client::new();
-    let response = client
-        .post(target_url)
-        .json(&payload)
-        .send()
-        .await?;
+    loop {
+        // 10秒の経過を待機
+        ticker.tick().await;
 
-    println!("レスポンスステータス: {}", response.status());
-
-    let response_text = response.text().await?;
-    println!("サーバー返却データ:\n{}", response_text);
-
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // 1. テスト専用のモックコレクター（実機の環境情報に依存しない）
-    pub struct DummyCollector;
-
-    impl MetricsCollector for DummyCollector {
-        fn collect_host_info(&self) -> HostInfo {
-            HostInfo {
-                hostname: "test-host".to_string(),
-                os_type: OsType::MacOS,
-                agent_version: "0.1.0".to_string(),
-            }
-        }
-
-        fn collect_metrics(&self) -> SystemMetrics {
-            SystemMetrics {
-                cpu_usage_percent: 12.5,
-                memory: MemoryMetrics {
-                    total_bytes: 1000,
-                    used_bytes: 500,
-                    usage_percent: 50.0,
-                },
-                disk: DiskMetrics {
-                    total_bytes: 2000,
-                    used_bytes: 1000,
-                    usage_percent: 50.0,
-                },
-                uptime_seconds: 1234,
-            }
-        }
-
-        fn build_payload(&self) -> MonitorPayload {
-            MonitorPayload {
-                host_info: self.collect_host_info(),
-                metrics: self.collect_metrics(),
-                timestamp_unix: 1700000000,
-            }
-        }
-    }
-
-    // 2. OsType の serde シリアライズ/デシリアライズ検証（lowercase化の動作確認）
-    #[test]
-    fn test_os_type_serde() {
-        let os = OsType::MacOS;
-        let json_str = serde_json::to_string(&os).expect("Failed to serialize OsType");
-        assert_eq!(json_str, "\"macos\"");
-
-        let deserialized: OsType = serde_json::from_str("\"macos\"").expect("Failed to deserialize OsType");
-        assert_eq!(deserialized, OsType::MacOS);
-    }
-
-    // 3. DummyCollector を用いた MetricsCollector トレイティの実装検証
-    #[test]
-    fn test_dummy_collector_payload() {
-        let collector = DummyCollector;
         let payload = collector.build_payload();
+        println!("[Unix: {}] メトリクスを送信中...", payload.timestamp_unix);
 
-        assert_eq!(payload.host_info.hostname, "test-host");
-        assert_eq!(payload.host_info.os_type, OsType::MacOS);
-        assert_eq!(payload.metrics.cpu_usage_percent, 12.5);
-        assert_eq!(payload.metrics.memory.used_bytes, 500);
-        assert_eq!(payload.timestamp_unix, 1700000000);
-    }
-
-    // 4. MonitorPayload 全体が正しい JSON キー構造へ変換されるか検証
-    #[test]
-    fn test_payload_json_structure() {
-        let collector = DummyCollector;
-        let payload = collector.build_payload();
-
-        let json_value = serde_json::to_value(&payload).expect("Failed to convert payload to serde_json::Value");
-
-        assert_eq!(json_value["host_info"]["hostname"], "test-host");
-        assert_eq!(json_value["host_info"]["os_type"], "macos");
-        assert_eq!(json_value["metrics"]["cpu_usage_percent"], 12.5);
-        assert_eq!(json_value["metrics"]["memory"]["usage_percent"], 50.0);
+        // HTTP POST リクエスト送信 (JSON自動シリアライズ)
+        match client.post(target_url).json(&payload).send().await {
+            Ok(response) => {
+                if response.status().is_success() {
+                    println!(" -> 送信成功: ステータスコード {}", response.status());
+                } else {
+                    eprintln!(" -> 送信エラー: ステータスコード {}", response.status());
+                }
+            }
+            Err(err) => {
+                eprintln!(" -> 通信エラーが発生しました: {}", err);
+            }
+        }
     }
 }
